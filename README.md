@@ -41,7 +41,8 @@ Documentation will be available as the project matures.
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are NOT welcome at this point. But if you have any suggestions or find any bugs, please open an [issue](https://github.com/yourusername/ziggydb/issues/new).
+We will open this for contributions when the project is ready for development.
 
 ## 📜 License
 

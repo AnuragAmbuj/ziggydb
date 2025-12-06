@@ -65,4 +65,21 @@ pub const BlockIter = struct {
 
         return .{ .key = key, .value = value };
     }
+
+    pub fn peek(self: *BlockIter) !?[]const u8 {
+        if (self.off >= self.data.len) return null;
+        
+        // Peek key without advancing off
+        // Parse key len
+        const kd = try varint.get(self.data[self.off..]);
+        const klen: usize = @intCast(kd.v);
+        // Parse value len
+        const vd = try varint.get(self.data[self.off + kd.len ..]);
+        // const vlen: usize = @intCast(vd.v);
+        
+        const key_start = self.off + kd.len + vd.len;
+        if (key_start + klen > self.data.len) return error.Corrupted;
+
+        return self.data[key_start .. key_start + klen];
+    }
 };

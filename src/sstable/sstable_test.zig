@@ -1,175 +1,262 @@
 const std = @import("std");
 const z = @import("ziggydb");
-const varint = z.codec.varint;
-const Block = z.sstable.block;
+const TableBuilder = z.sstable.builder.TableBuilder;
+const TableReader = z.sstable.reader.TableReader;
 
-const MAGIC: u32 = 0x5A494747;
+test "sstable: builder -> reader roundtrip" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-pub const TableReader = struct {
-    file: std.fs.File,
-    // parsed index in memory
-    keys: [][]const u8,
-    offs: []u64,
-    lens: []u32,
-    slab: []u8,                 // backing for keys
-    allocator: std.mem.Allocator,
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "test.sst" });
+    defer std.testing.allocator.free(path);
 
-    pub fn open(allocator: std.mem.Allocator, path: []const u8) !TableReader {
-        var f = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+    // 1. Write SSTable
+    {
+        var tb = try TableBuilder.create(std.testing.allocator, path, 4096);
+        defer tb.deinit();
+
+        try tb.add("key1", "value1");
+        try tb.add("key2", "value2");
+        try tb.add("key3", "value3");
+        try tb.finish();
+    }
+
+    // 2. Read SSTable
+    {
+        var tr = try TableReader.open(std.testing.allocator, path);
+        defer tr.close();
+
+        // Test existing keys
+        const v1 = (try tr.get("key1", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v1);
+        try std.testing.expectEqualStrings("value1", v1);
+
+        const v2 = (try tr.get("key2", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v2);
+        try std.testing.expectEqualStrings("value2", v2);
+
+        const v3 = (try tr.get("key3", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v3);
+        try std.testing.expectEqualStrings("value3", v3);
+
+        // Test missing keys
+        try std.testing.expect((try tr.get("key0", std.testing.allocator)) == null);
+        try std.testing.expect((try tr.get("key4", std.testing.allocator)) == null);
+    }
+}
+
+test "sstable: bloom filter" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "bloom.sst" });
+    defer std.testing.allocator.free(path);
+
+    // 1. Write SSTable with keys
+    {
+        var tb = try TableBuilder.create(std.testing.allocator, path, 4096);
+        defer tb.deinit();
+
+        try tb.add("apple", "red");
+        try tb.add("banana", "yellow");
+        try tb.add("cherry", "red");
+        try tb.finish();
+    }
+
+    // 2. Read and verify
+    {
+        var tr = try TableReader.open(std.testing.allocator, path);
+        defer tr.close();
+
+        // Should have bloom filter
+        try std.testing.expect(tr.bloom != null);
+
+        // Existing keys found
+        const v1 = (try tr.get("apple", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v1);
+        try std.testing.expectEqualStrings("red", v1);
+
+        // Missing keys not found
+        try std.testing.expect((try tr.get("durian", std.testing.allocator)) == null);
+        try std.testing.expect((try tr.get("elderberry", std.testing.allocator)) == null);
+    }
+}
+
+test "sstable: multi-block read" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "multi.sst" });
+    defer std.testing.allocator.free(path);
+
+    // 1. Write SSTable with small block size to force multiple blocks
+    {
+        var tb = try TableBuilder.create(std.testing.allocator, path, 100); // Small block size
+        defer tb.deinit();
+
+        var buf: [32]u8 = undefined;
+        var i: usize = 0;
+        while (i < 100) : (i += 1) {
+            const key = try std.fmt.bufPrint(&buf, "k{:0>4}", .{i});
+            const val = try std.fmt.bufPrint(&buf, "v{:0>4}", .{i});
+            try tb.add(key, val);
+        }
+        try tb.finish();
+    }
+
+    // 2. Read random keys
+    {
+        var tr = try TableReader.open(std.testing.allocator, path);
+        defer tr.close();
+
+        // Check first
+        const v0 = (try tr.get("k0000", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v0);
+        try std.testing.expectEqualStrings("v0000", v0);
+
+        // Check last
+        const v99 = (try tr.get("k0099", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v99);
+        try std.testing.expectEqualStrings("v0099", v99);
+
+        // Check middle
+        const v50 = (try tr.get("k0050", std.testing.allocator)) orelse return error.NotFound;
+        defer std.testing.allocator.free(v50);
+        try std.testing.expectEqualStrings("v0050", v50);
+
+        // Check missing
+        try std.testing.expect((try tr.get("k0100", std.testing.allocator)) == null);
+    }
+}
+
+test "sstable: empty table" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "empty.sst" });
+    defer std.testing.allocator.free(path);
+
+    // 1. Write empty SSTable
+    {
+        var tb = try TableBuilder.create(std.testing.allocator, path, 4096);
+        defer tb.deinit();
+        try tb.finish();
+    }
+
+    // 2. Read
+    {
+        var tr = try TableReader.open(std.testing.allocator, path);
+        defer tr.close();
+
+        try std.testing.expect((try tr.get("anything", std.testing.allocator)) == null);
+    }
+}
+
+test "sstable: corruption - truncated file" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "trunc.sst" });
+    defer std.testing.allocator.free(path);
+
+    // Create a file smaller than footer (28 bytes)
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll("too short");
+    }
+
+    // Open should fail
+    try std.testing.expectError(error.InvalidSSTable, TableReader.open(std.testing.allocator, path));
+}
+
+test "sstable: corruption - truncated index" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "corrupt_idx.sst" });
+    defer std.testing.allocator.free(path);
+
+    // 1. Write valid SSTable
+    {
+        var tb = try TableBuilder.create(std.testing.allocator, path, 4096);
+        defer tb.deinit();
+        try tb.add("a", "b");
+        try tb.finish();
+    }
+
+    // 2. Corrupt the footer: make index_len huge
+    {
+        const f = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+        defer f.close();
         const st = try f.stat();
-        if (st.size < 16) return error.Corrupted;
+        
+        // Read footer
+        var footer: [28]u8 = undefined;
+        try f.preadAll(&footer, st.size - 28);
 
-        // read footer
-        var fb: [16]u8 = undefined;
-        try f.preadAll(&fb, st.size - 16);
-        const magic = std.mem.readInt(u32, fb[12..16], .little);
-        if (magic != MAGIC) return error.BadMagic;
-        const index_off = std.mem.readInt(u64, fb[0..8], .little);
-        const index_len = std.mem.readInt(u32, fb[8..12], .little);
-        if (index_off + index_len > st.size - 16) return error.Corrupted;
+        // Corrupt index_len (bytes 8..12) to be huge
+        std.mem.writeInt(u32, footer[8..12], 0xFFFFFFFF, .little);
 
-        // read entire index
-        var slab = try allocator.alloc(u8, index_len);
-        errdefer allocator.free(slab);
-        try f.preadAll(slab, index_off);
-
-        // parse index into arrays (point into slab)
-        var keys = std.ArrayList([]const u8).init(allocator);
-        var offs = std.ArrayList(u64).init(allocator);
-        var lens = std.ArrayList(u32).init(allocator);
-
-        var off: usize = 0;
-        while (off < slab.len) {
-            // key len
-            const kd = try varint.get(slab[off..]);
-            off += kd.len;
-            const klen: usize = @intCast(kd.v);
-            if (off + klen + 8 + 4 > slab.len) break;
-            const key = slab[off .. off + klen];
-            off += klen;
-
-            const boff = std.mem.readInt(u64, slab[off .. off + 8], .little);
-            off += 8;
-            const blen = std.mem.readInt(u32, slab[off .. off + 4], .little);
-            off += 4;
-
-            try keys.append(key);
-            try offs.append(boff);
-            try lens.append(blen);
-        }
-
-        return .{
-            .file = f,
-            .keys = try keys.toOwnedSlice(),
-            .offs = try offs.toOwnedSlice(),
-            .lens = try lens.toOwnedSlice(),
-            .slab = slab,
-            .allocator = allocator,
-        };
+        // Write back
+        try f.pwriteAll(&footer, st.size - 28);
     }
 
-    pub fn close(self: *TableReader) void {
-        self.file.close();
-        self.allocator.free(self.keys);
-        self.allocator.free(self.offs);
-        self.allocator.free(self.lens);
-        self.allocator.free(self.slab);
+    // 3. Open should fail (likely EndOfStream when trying to read index)
+    try std.testing.expectError(error.EndOfStream, TableReader.open(std.testing.allocator, path));
+}
+
+test "sstable: corruption - corrupt bloom header" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "corrupt_bloom.sst" });
+    defer std.testing.allocator.free(path);
+
+    // 1. Write valid SSTable with bloom
+    {
+        var tb = try TableBuilder.create(std.testing.allocator, path, 4096);
+        defer tb.deinit();
+        try tb.add("a", "b");
+        try tb.finish();
     }
 
-    // Binary search the index for the first block whose last_key >= key
-    fn findBlock(self: *TableReader, key: []const u8) ?usize {
-        var lo: usize = 0;
-        var hi: usize = self.keys.len;
-        while (lo < hi) {
-            const mid = (lo + hi) / 2;
-            const ord = std.mem.order(u8, self.keys[mid], key);
-            if (ord == .lt) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        if (lo >= self.keys.len) return null;
-        return lo;
+    // 2. Corrupt the footer: make bloom_len small (but > 0) so it fails header check
+    {
+        const f = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+        defer f.close();
+        const st = try f.stat();
+        
+        // Read footer
+        var footer: [28]u8 = undefined;
+        try f.preadAll(&footer, st.size - 28);
+
+        // Corrupt bloom_len (bytes 20..24) to be 5 (too small for header)
+        std.mem.writeInt(u32, footer[20..24], 5, .little);
+
+        // Write back
+        try f.pwriteAll(&footer, st.size - 28);
     }
 
-    pub fn get(self: *TableReader, key: []const u8, allocator: std.mem.Allocator) !?[]u8 {
-        const bi = self.findBlock(key) orelse return null;
+    // 3. Open should fail
+    try std.testing.expectError(error.CorruptBloom, TableReader.open(std.testing.allocator, path));
+}
 
-        // read block bytes
-        const off = self.offs[bi];
-        const len = self.lens[bi];
-        const buf = try allocator.alloc(u8, len);
-        errdefer allocator.free(buf);
-        try self.file.preadAll(buf, off);
+test "sstable: corruption - bad magic" {
+    const tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-        var it = Block.BlockIter.init(buf);
-        while (try it.next()) |e| {
-            const ord = std.mem.order(u8, e.key, key);
-            if (ord == .eq) {
-                const out = try allocator.alloc(u8, e.value.len);
-                @memcpy(out, e.value);
-                allocator.free(buf);
-                return out;
-            }
-            if (ord == .gt) break;
-        }
-        allocator.free(buf);
-        return null;
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp.dir_path, "magic.sst" });
+    defer std.testing.allocator.free(path);
+
+    // Write a file with enough size but bad magic
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        var buf: [28]u8 = undefined;
+        @memset(&buf, 0);
+        try f.writeAll(&buf);
     }
 
-    pub const Iter = struct {
-        tr: *TableReader,
-        block_idx: usize,
-        block_buf: []u8 = &[_]u8{},
-        it: Block.BlockIter = undefined,
-        end: []const u8,
-        allocator: std.mem.Allocator,
-        started: bool = false,
-
-        pub fn init(tr: *TableReader, allocator: std.mem.Allocator, start: []const u8, end: []const u8) !Iter {
-            var block_idx: usize = 0;
-            if (start.len != 0) {
-                if (tr.findBlock(start)) |i| block_idx = i;
-            }
-            var iter = Iter{
-                .tr = tr,
-                .block_idx = block_idx,
-                .end = end,
-                .allocator = allocator,
-            };
-            try iter.loadBlock();
-            return iter;
-        }
-
-        fn loadBlock(self: *Iter) !void {
-            if (self.block_idx >= self.tr.keys.len) {
-                self.block_buf = &[_]u8{};
-                return;
-            }
-            const off = self.tr.offs[self.block_idx];
-            const len = self.tr.lens[self.block_idx];
-            if (self.block_buf.len != 0) self.allocator.free(self.block_buf);
-            self.block_buf = try self.allocator.alloc(u8, len);
-            try self.tr.file.preadAll(self.block_buf, off);
-            self.it = Block.BlockIter.init(self.block_buf);
-        }
-
-        pub fn deinit(self: *Iter) void {
-            if (self.block_buf.len != 0) self.allocator.free(self.block_buf);
-        }
-
-        pub fn next(self: *Iter) !?struct { key: []const u8, value: []const u8 } {
-            while (true) {
-                if (self.block_idx >= self.tr.keys.len) return null;
-                if (try self.it.next()) |e| {
-                    if (self.end.len != 0 and std.mem.order(u8, e.key, self.end) != .lt) return null;
-                    return e;
-                } else {
-                    self.block_idx += 1;
-                    try self.loadBlock();
-                }
-            }
-        }
-    };
-};
+    try std.testing.expectError(error.InvalidSSTable, TableReader.open(std.testing.allocator, path));
+}

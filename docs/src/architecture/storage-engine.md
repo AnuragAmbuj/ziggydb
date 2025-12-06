@@ -7,14 +7,17 @@ ZiggyDB's storage engine is designed for high performance and reliability, using
 ✅ **Core Features**
 - [x] Write-Ahead Log (WAL) with checksums
 - [x] In-memory MemTable with skip list
-- [x] Automatic MemTable flush to SSTable
-- [x] SSTable metadata management in MANIFEST
+- [x] Automatic MemTable flush to SSTable (Level 0)
+- [x] Leveled Compaction (L0 -> L1)
+- [x] Merging Iterator (Range Scans across levels)
+- [x] SSTable metadata management in MANIFEST (v3)
 - [x] Recovery from WAL and SSTables
+- [x] LRU Block Cache
 
 🚧 **In Progress**
+- [ ] Transaction support (Conflict detection refined)
 - [ ] Bloom filters for SSTables
-- [ ] Multi-level compaction
-- [ ] Transaction support
+- [ ] Advanced Compaction (L1 -> L2, etc.)
 
 ## Architecture
 
@@ -24,7 +27,7 @@ The MemTable is an in-memory data structure that buffers all writes before they 
 
 - **Purpose**: Provides fast write performance
 - **Implementation**: Uses a skip list for ordered key-value storage
-- **Flush**: When size exceeds `opts.memtable_bytes`, it's converted to an SSTable
+- **Flush**: When size exceeds `opts.memtable_bytes`, it's converted to an SSTable in Level 0 (L0).
 - **Thread Safety**: Handles concurrent reads and writes
 
 ### 2. Write-Ahead Log (WAL)
@@ -33,44 +36,53 @@ The WAL ensures durability by logging all writes before they are applied to the 
 
 - **Purpose**: Recovers unflushed data after crashes
 - **Format**: Binary format with CRC32C checksums
-- **Recovery**: Replays the log on startup
+- **Recovery**: Replays the log on startup, handling log rotation.
 - **Durability**: Configurable fsync behavior via `fsync_on_commit`
 
 ### 3. SSTables (Sorted String Tables)
 
-Immutable on-disk files that store sorted key-value pairs.
+Immutable on-disk files that store sorted key-value pairs, organized into **7 Levels (L0 - L6)**.
 
-- **Structure**:
-  - Data blocks (key-value pairs)
-  - Index blocks (pointers to data blocks)
-  - Footer (metadata and checksums)
-- **Levels**: Currently using a single level (L0)
-- **File Naming**: `MANIFEST-{seq}.log` for metadata, `{number}.sst` for data
+- **Level 0 (L0)**:
+  - Created by flushing MemTables.
+  - Keys can overlap between files.
+  - Sorted by recency (newest to oldest).
+- **Level 1 - Level 6 (L1..L6)**:
+  - Created by compaction.
+  - Files within a level are **disjoint** (non-overlapping key ranges) and sorted.
+  - Size targets increase exponentially (e.g., L1=10MB, L2=100MB).
+- **File Naming**: 
+  - `MANIFEST`: Stores file list, levels, and key ranges (v3 format).
+  - `{seq}.sst`: Data files.
+  - `{seq}.log`: WAL files.
 
-### 4. Bloom Filters (Planned)
+### 4. Compaction Service
 
-Probabilistic data structures that quickly determine if a key might be in an SSTable.
+Background process that maintains the LSM-tree structure.
 
-- **Purpose**: Will reduce disk I/O for non-existent keys
-- **Status**: Implementation in progress
+- **L0 -> L1**: Triggered when L0 has too many files. Merges overlapping L0 files into L1.
+- **L(N) -> L(N+1)**: Triggered when L(N) exceeds size limit. Picks a file from L(N) and merges with overlapping files in L(N+1).
+- **Garbage Collection**: Obsolete files (SST/WAL) are deleted after compaction/flush updates the Manifest.
 
 ## Write Path
 
-1. Write is encoded in a batch format
-2. Batch is appended to the WAL (with optional fsync)
-3. Write is applied to the MemTable with a monotonically increasing sequence number
-4. When MemTable size ≥ `opts.memtable_bytes`:
-   - It becomes immutable
-   - A new MemTable is created
-   - The old one is asynchronously flushed to disk as an SSTable
-   - New SSTable metadata is appended to MANIFEST
+1. Write is encoded in a batch format.
+2. Batch is appended to the WAL (serial persistence).
+3. Write is applied to the MemTable.
+4. When MemTable is full:
+   - Rotates to Immutable MemTable.
+   - Rotates WAL to new log file.
+   - Flushes Immutable MemTable to a new **Level 0** SSTable.
+   - Updates Manifest (Adds new L0 file, Updates Log Number).
 
 ## Read Path
 
-1. Check the active MemTable
-2. If not found, check immutable MemTables (if any)
-3. If still not found, search SSTables from newest to oldest
-4. Return the first matching value found (or `null` if not found)
+1. Check the active MemTable.
+2. Check Immutable MemTable (if flushing).
+3. **Level 0 Scan**: Iterate L0 files from newest to oldest. Since they overlap, we must check each file that might contain the key.
+4. **Level 1..6 Scan**: For each level, find the single file that might overlap the key (using file bounds from Manifest).
+5. Return the first matching value found.
+6. **Block Cache**: SSTable blocks are cached in an LRU cache to speed up repeated reads.
 
 ## Recovery Process
 
@@ -111,8 +123,6 @@ Process of merging and rewriting SSTables to remove overwritten or deleted data.
 ## Configuration Options
 
 - MemTable size
-- SSTable size
-- Compaction strategy
 - Cache sizes
 - Compression
 

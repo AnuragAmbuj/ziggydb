@@ -13,7 +13,6 @@ test "run all module tests" {
 
     // core
     _ = z.wal;
-    _ = z.memtable;
     _ = z.memtable_tests;
 
     // sstable
@@ -38,4 +37,6 @@ test "run all module tests" {
 
     _ = z.db_smoke_test;
     _ = z.db_recovery_test;
+    _ = z.db_cache_test;
+    _ = z.db_leveled_test;
 }

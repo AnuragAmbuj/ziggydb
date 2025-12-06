@@ -3,4 +3,5 @@ pub const Options = struct {
     memtable_bytes: usize = 64 * 1024 * 1024,
     block_size: u32 = 16 * 1024,
     fsync_on_commit: bool = true,
+    block_cache_bytes: usize = 0, // 0 = Disabled
 };

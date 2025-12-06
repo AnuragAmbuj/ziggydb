@@ -15,14 +15,15 @@ pub const Writer = struct {
     next_seq: u64 = 1, // segment sequence (1-based)
     allocator: std.mem.Allocator,
 
-    pub fn open(allocator: std.mem.Allocator, dir_path: []const u8, seg_max_bytes: usize) !Writer {
+    pub fn open(allocator: std.mem.Allocator, dir_path: []const u8, seg_max_bytes: usize, initial_seq: u64) !Writer {
         try fsu.ensureDir(dir_path);
         var w = Writer{
             .dir_path = try dup(allocator, dir_path),
             .seg_max_bytes = std.math.max(seg_max_bytes, 1 * 1024 * 1024),
             .allocator = allocator,
+            .next_seq = initial_seq,
         };
-        try w.rotate(); // open first segment
+        try w.rotate(); // open first segment (initial_seq)
         return w;
     }
 

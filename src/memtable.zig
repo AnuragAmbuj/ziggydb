@@ -157,6 +157,64 @@ pub const MemTable = struct {
         return null;
     }
 
+    pub fn getLatestSeq(self: *MemTable, key: []const u8) u64 {
+        var n = self.findGE(key, std.math.maxInt(u64), null);
+        // findGE gives the first node >= (key, maxInt). 
+        // Our sort is (key asc, seq desc). 
+        // So (key, maxInt) is the "highest" possible version for this key.
+        // Wait, findGE returns node >= probe.
+        // keys are asc. seqs are desc.
+        // probe = (key, maxInt).
+        // if key exists, we want (key, highest_seq). 
+        // (key, highest_seq) < (key, maxInt)?
+        // compare: keys eq. seq: highest < maxInt. true.
+        // So less(...) returns true?
+        // `less(a, b)`: a < b.
+        // We want node >= probe.
+        // `(key, S)` vs `(key, maxInt)`. 
+        // key eq. 
+        // order is `a.seq > b.seq` for "descending".
+        // if a.seq > b.seq, then a "comes before" b?
+        // Skiplist orders "smaller" keys first.
+        // `less` returns true if `a` should be before `b`.
+        // If keys equal, `a.seq > b.seq`.
+        // So larger sequence numbers appear EARLIER in the list.
+        // So (key, 100) comes before (key, 90).
+        // `findGE(key, maxInt)`:
+        // probe has seq=maxInt.
+        // Any real node has seq < maxInt.
+        // So real nodes come *after* probe?
+        // No, `seq > maxInt` is false.
+        // `less(real, probe)`: `real.seq > maxInt` => false.
+        // `less(probe, real)`: `maxInt > real.seq` => true.
+        // So probe is "smaller" (earlier) than real?
+        // Wait, `less` logic:
+        // `return a.seq > b.seq`.
+        // If a.seq=100, b.seq=99. 100 > 99 is true. a < b?
+        // No, `less` defines the order. "a comes before b".
+        // So seq 100 comes before seq 99.
+        // Seq maxInt comes before everything.
+        // So `findGE` with maxInt should land on the very first version of `key`?
+        // Let's verify `findGE` logic.
+        // `nx < probe`? `less(nx, probe)`.
+        // if less, advance.
+        // We want `nx >= probe` (not less).
+        // `less` says `seq 100` is "less than" `seq 99` (comes before).
+        // `maxInt` is the "smallest" possible element in our ordering (comes first).
+        // So `findGE(key, maxInt)` should return the first element >= key.
+        // If `key` exists, it returns first version.
+        
+        while (n) |cur| {
+             const ord = std.mem.order(u8, cur.user_key, key);
+             if (ord == .gt) return 0; // passed key
+             if (ord == .eq) {
+                 return cur.seq;
+             }
+             n = cur.next[0];
+        }
+        return 0;
+    }
+
     // Iterator over a user-key range [start, end) (end may be empty = unbounded)
     pub const Iter = struct {
         mt: *MemTable,
@@ -212,8 +270,8 @@ pub const MemTable = struct {
                 if (vis) |v| {
                     self.last_key = cur.user_key;
                     if (v.kind == .Del) {
-                        // tombstoned at snapshot — skip emit
-                        continue;
+                        // Emit tombstones so flush/merge sees them.
+                        // Consumers (like get/scan) must handle them.
                     }
                     return Entry{
                         .user_key = v.user_key,

@@ -6,8 +6,6 @@ pub const codec = struct {
 pub const util = struct {
     pub const arena = @import("util/arena.zig");
     pub const fs    = @import("util/fs.zig");
-    pub const buf   = @import("util/buf.zig");
-    pub const rand  = @import("util/rand.zig");
 };
 
 pub const wal       = @import("wal.zig");
@@ -37,10 +35,7 @@ pub const sstable = struct {
 // Other components you already have (no-op if they have no tests yet)
 pub const compaction = @import("compaction.zig");
 pub const db         = @import("db.zig");
-pub const lib        = @import("lib.zig");
-pub const mvcc       = @import("mvcc.zig");
 pub const options    = @import("options.zig");
-pub const txn        = @import("txn.zig");
 
 pub const flush    = @import("flush.zig");
 pub const manifest = @import("manifest.zig");

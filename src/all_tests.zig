@@ -8,8 +8,6 @@ test "run all module tests" {
     // utils
     _ = z.util.arena;
     _ = z.util.fs;
-    _ = z.util.buf;
-    _ = z.util.rand;
 
     // core
     _ = z.wal;
@@ -26,10 +24,9 @@ test "run all module tests" {
     _ = z.cache;
     _ = z.compaction;
     _ = z.db;
-    _ = z.lib;
-    _ = z.mvcc;
     _ = z.options;
-    _ = z.txn;
+    _ = z.transaction;
+    _ = z.transaction_tests;
 
     // flush and manifest
     _ = z.flush;
